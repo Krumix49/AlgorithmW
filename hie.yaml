@@ -1,0 +1,6 @@
+cradle:
+  cabal:
+    - path: "./src"
+      component: "algorithm-w-reimpl:exe:algorithm-w"
+    - path: "./app"
+      component: "algorithm-w-reimpl:exe:algorithm-w"
