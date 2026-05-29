@@ -26,8 +26,10 @@ executable AlgorithmW-user
   main-is:          MainUser.hs
   hs-source-dirs:   app, src
   other-modules:
+      Builtins
       Inference
       MonadStack
+      Parser
       Pretty
       Syntax
       TypeEnv

@@ -1,0 +1,84 @@
+% MATLAB-like pseudo-functions for AlgorithmW-user
+
+function identity(x) = x
+
+function y = addOne(x)
+  y = x + 1
+end
+
+function z = addMul(x, y)
+  z = (x + y) * 2
+end
+
+function z = affine(x)
+  shifted = x + 1
+  scaled = shifted * 2
+  z = scaled + 3
+end
+
+function m = max2(a, b)
+  m = if a > b then a else b
+end
+
+function y = absVal(x)
+  if x < 0
+    flipped = -x;
+    y = flipped;
+  else
+    y = x;
+  end
+end
+
+function y = choose(flag, a, b)
+  if flag
+    y = a
+  else
+    y = b
+  end
+end
+
+function y = clampSign(x)
+  if x < 0
+    y = -1
+  elseif x == 0
+    y = 0
+  else
+    y = 1
+  end
+end
+
+function y = threshold3(x)
+  if x < 10
+    y = 1
+  else if x < 20
+    y = 2
+  else
+    y = 3
+  end
+end
+
+function y = codeScore(code)
+  switch code
+    case 0
+      base = 90
+      y = base + 10
+    case 1
+      y = 80
+    case 2
+      y = 60
+    otherwise
+      y = 0
+  end
+end
+
+function ok = bothPositive(a, b)
+  ok = (a > 0) && (b > 0)
+end
+
+function y = addTwo(x)
+  y = addOne(addOne(x))
+end
+
+function bad(x)
+  if x then 1 else false
+end
