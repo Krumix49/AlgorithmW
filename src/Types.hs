@@ -22,6 +22,7 @@ data Type
   | TInt
   | TBool
   | TFun Type Type
+  | TList Type
   deriving (Eq, Ord)
 
 data Scheme = Scheme [String] Type  -- 带forall的多态类型
@@ -48,12 +49,14 @@ instance Types Type where
   ftv TInt = Set.empty
   ftv TBool = Set.empty
   ftv (TFun left right) = ftv left `Set.union` ftv right
+  ftv (TList item) = ftv item
 
   apply subst t@(TVar name) =  -- 在映射表里查询类型
     case Map.lookup name subst of
       Nothing -> t
       Just replacement -> replacement
   apply subst (TFun left right) = TFun (apply subst left) (apply subst right)
+  apply subst (TList item) = TList (apply subst item)
   apply _ TInt = TInt
   apply _ TBool = TBool
 
@@ -100,22 +103,23 @@ instance Show Type where
 
 instance Show Scheme where
   show (Scheme [] t) = show t
-  show (Scheme vars t) = "forall " ++ unwords vars ++ ". " ++ show t
+  show (Scheme vars t) = "对于任意 " ++ unwords vars ++ ". " ++ show t
 
 instance Show TypeError where
   show (UnboundVariable name) =
-    "unbound variable: " ++ name
+    "未绑定的变量：" ++ name
   show (TypesDoNotUnify t1 t2) =
-    "types do not unify: " ++ show t1 ++ " vs. " ++ show t2
+    "类型无法统一：" ++ show t1 ++ " 与 " ++ show t2 ++ " 不一致"
   show (InfiniteType name t) =
-    "occurs check failed: cannot construct infinite type " ++ name ++ " ~ " ++ show t
+    "occurs check 失败：不能构造无限类型 " ++ name ++ " ~ " ++ show t
   show (ParseFailure msg) =
-    "parse error: " ++ msg
+    "解析错误：" ++ msg
 
 showType :: Int -> Type -> String
 showType _ (TVar name) = name
 showType _ TInt = "Int"
 showType _ TBool = "Bool"
+showType _ (TList item) = "[" ++ showType 0 item ++ "]"
 showType p (TFun left right) =
   parensIf (p > 0) (showType 1 left ++ " -> " ++ showType 0 right)
 

@@ -2,6 +2,7 @@ module Syntax
   ( Exp(..)
   , Lit(..)
   , BinOp(..)
+  , Stmt(..)
   ) where
 
 data Exp
@@ -12,6 +13,16 @@ data Exp
   | ELet String Exp Exp
   | EIf Exp Exp Exp
   | EBin BinOp Exp Exp
+  | EList [Exp]
+  | EBlock [Stmt] String
+  deriving (Eq, Ord)
+
+data Stmt
+  = SAssign String Exp
+  | SIfStmt Exp [Stmt] [Stmt]
+  | SSwitchStmt Exp [(Exp, [Stmt])] [Stmt]
+  | SFor String Exp [Stmt]
+  | SWhile Exp [Stmt]
   deriving (Eq, Ord)
 
 data Lit
@@ -23,27 +34,36 @@ data BinOp
   = Add
   | Sub
   | Mul
+  | Div
   | Eq
+  | Ne
+  | Lt
+  | Le
+  | Gt
+  | Ge
   | And
   | Or
   deriving (Eq, Ord)
 
 instance Show Exp where
-  show :: Exp -> String
   show = showExp 0
 
 instance Show Lit where
-  show :: Lit -> String
   show (LInt n) = show n
   show (LBool True) = "True"
   show (LBool False) = "False"
 
 instance Show BinOp where
-  show :: BinOp -> String
   show Add = "+"
   show Sub = "-"
   show Mul = "*"
+  show Div = "/"
   show Eq = "=="
+  show Ne = "~="
+  show Lt = "<"
+  show Le = "<="
+  show Gt = ">"
+  show Ge = ">="
   show And = "&&"
   show Or = "||"
 
@@ -62,15 +82,49 @@ showExp p (EBin op left right) =
   parensIf (p > prec) (showExp prec left ++ " " ++ show op ++ " " ++ showExp (prec + 1) right)
   where
     prec = binPrec op
+showExp _ (EList items) =
+  "[" ++ joinWith ", " (map (showExp 0) items) ++ "]"
+showExp _ (EBlock stmts outputName) =
+  "block { " ++ joinWith "; " (map showStmt stmts) ++ "; return " ++ outputName ++ " }"
 
 binPrec :: BinOp -> Int
 binPrec Or = 1
 binPrec And = 2
 binPrec Eq = 3
+binPrec Ne = 3
+binPrec Lt = 3
+binPrec Le = 3
+binPrec Gt = 3
+binPrec Ge = 3
 binPrec Add = 4
 binPrec Sub = 4
 binPrec Mul = 5
+binPrec Div = 5
 
 parensIf :: Bool -> String -> String
 parensIf True s = "(" ++ s ++ ")"
 parensIf False s = s
+
+showStmt :: Stmt -> String
+showStmt (SAssign name expr) =
+  name ++ " = " ++ showExp 0 expr
+showStmt (SIfStmt cond yes no) =
+  "if " ++ showExp 0 cond ++ " then { " ++ joinWith "; " (map showStmt yes)
+  ++ " } else { " ++ joinWith "; " (map showStmt no) ++ " }"
+showStmt (SSwitchStmt subject cases otherwiseBranch) =
+  "switch " ++ showExp 0 subject ++ " { "
+  ++ joinWith "; " (map showCase cases)
+  ++ "; otherwise { " ++ joinWith "; " (map showStmt otherwiseBranch) ++ " } }"
+showStmt (SFor name items body) =
+  "for " ++ name ++ " in " ++ showExp 0 items ++ " { " ++ joinWith "; " (map showStmt body) ++ " }"
+showStmt (SWhile cond body) =
+  "while " ++ showExp 0 cond ++ " { " ++ joinWith "; " (map showStmt body) ++ " }"
+
+showCase :: (Exp, [Stmt]) -> String
+showCase (value, body) =
+  "case " ++ showExp 0 value ++ " { " ++ joinWith "; " (map showStmt body) ++ " }"
+
+joinWith :: String -> [String] -> String
+joinWith _ [] = ""
+joinWith _ [x] = x
+joinWith sep (x:xs) = x ++ sep ++ joinWith sep xs

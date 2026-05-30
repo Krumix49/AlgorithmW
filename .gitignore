@@ -1,1 +1,4 @@
 dist-newstyle/
+*.hi
+*.o
+*.exe
