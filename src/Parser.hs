@@ -20,13 +20,14 @@ data Token
   | TokArrow
   | TokEquals
   | TokOp String
-  | TokLParen
-  | TokRParen
-  | TokEOF
+  | TokLParen  -- 左括号
+  | TokRParen  -- 右括号
+  | TokEOF  -- 文件结束
   deriving (Eq, Show)
 
 newtype Parser a = Parser { runParser :: [Token] -> Either String (a, [Token]) }
 
+-- 这三个和Infer里的基本一致
 instance Functor Parser where
   fmap f parser = Parser $ \tokens ->
     case runParser parser tokens of
@@ -61,14 +62,14 @@ parseExp input =
 tokenize :: String -> Either String [Token]
 tokenize [] = Right [TokEOF]
 tokenize (c:cs)
-  | isSpace c = tokenize cs
+  | isSpace c = tokenize cs  -- 跳过空格
   | isAlpha c = tokenizeIdent (c:cs)
   | isDigit c = tokenizeInt (c:cs)
-  | c == '\\' = cons TokLambda <$> tokenize cs
+  | c == '\\' = cons TokLambda <$> tokenize cs  -- <$>就是fmap，cons TokLambda :: [Token] -> [Token]
   | c == '(' = cons TokLParen <$> tokenize cs
   | c == ')' = cons TokRParen <$> tokenize cs
   | c == '-' && take 1 cs == ">" = cons TokArrow <$> tokenize (drop 1 cs)
-  | c == '=' && take 1 cs == "=" = cons (TokOp "==") <$> tokenize (drop 1 cs)
+  | c == '=' && take 1 cs == "=" = cons (TokOp "==") <$> tokenize (drop 1 cs)  -- 判断优先级大于单个=
   | c == '=' = cons TokEquals <$> tokenize cs
   | c == '&' && take 1 cs == "&" = cons (TokOp "&&") <$> tokenize (drop 1 cs)
   | c == '|' && take 1 cs == "|" = cons (TokOp "||") <$> tokenize (drop 1 cs)
@@ -79,7 +80,7 @@ tokenize (c:cs)
 
 tokenizeIdent :: String -> Either String [Token]
 tokenizeIdent input =
-  let (name, rest) = span isIdentChar input
+  let (name, rest) = span isIdentChar input  -- span根据要求切列表
       token = case name of
         "let" -> TokLet
         "in" -> TokIn
@@ -88,22 +89,22 @@ tokenizeIdent input =
         "else" -> TokElse
         "True" -> TokBool True
         "False" -> TokBool False
-        _ -> TokIdent name
+        _ -> TokIdent name  -- 非关键字就生成普通变量名
   in (token :) <$> tokenize rest
 
 tokenizeInt :: String -> Either String [Token]
 tokenizeInt input =
   let (digits, rest) = span isDigit input
-  in (TokInt (read digits) :) <$> tokenize rest
+  in (TokInt (read digits) :) <$> tokenize rest  -- read是把字符串转成整数
 
 isIdentChar :: Char -> Bool
-isIdentChar c = isAlphaNum c || c == '_' || c == '\''
+isIdentChar c = isAlphaNum c || c == '_' || c == '\''  -- 字母、数字、下划线、单引号
 
 parseExpr :: Parser Exp
 parseExpr = parseLet
 
-parseLet :: Parser Exp
-parseLet = do
+parseLet :: Parser Exp  -- 优先级低的先解析
+parseLet = do  -- let name = value in body
   token <- peek
   case token of
     TokLet -> do
@@ -158,7 +159,7 @@ parseMul = chainLeft parseApp [("*", Mul)]
 parseApp :: Parser Exp
 parseApp = do
   firstAtom <- parseAtom
-  rest <- manyAtoms
+  rest <- manyAtoms  -- 函数可能有多个参数
   pure (foldl EApp firstAtom rest)
 
 manyAtoms :: Parser [Exp]
@@ -190,7 +191,7 @@ parseAtom = do
       pure expr
     _ -> Parser $ \_ -> Left ("expected expression atom, got " ++ show token)
 
-chainLeft :: Parser Exp -> [(String, BinOp)] -> Parser Exp
+chainLeft :: Parser Exp -> [(String, BinOp)] -> Parser Exp  -- 解析左结合的二元运算，右边应该是更高优先级的表达式
 chainLeft parseTerm ops = do
   left <- parseTerm
   continue left
@@ -203,7 +204,7 @@ chainLeft parseTerm ops = do
             Just op -> do
               advance
               right <- parseTerm
-              continue (EBin op left right)
+              continue (EBin op left right)  -- 就是continue left，把(EBin op left right)视为left
             Nothing -> pure left
         _ -> pure left
 
@@ -228,10 +229,10 @@ peek :: Parser Token
 peek = Parser $ \tokens ->
   case tokens of
     [] -> Right (TokEOF, [])
-    token:_ -> Right (token, tokens)
+    token:_ -> Right (token, tokens)  -- 只取第一个但不消费
 
 advance :: Parser ()
 advance = Parser $ \tokens ->
   case tokens of
     [] -> Right ((), [])
-    _:rest -> Right ((), rest)
+    _:rest -> Right ((), rest)  -- 消费当前 token，但不关心它是什么
