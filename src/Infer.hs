@@ -1,234 +1,326 @@
 module Infer
   ( inferTop
   , inferTopWithEnv
+  , infer
+  , runInferM
+  , runInferMTrace
   , mgu
   , instantiate
   , preludeEnv
+  , inferWithPrelude
   ) where
 
 import qualified Data.Map.Strict as Map
 import qualified Data.Set as Set
 
 import Syntax
+import TraceEvents hiding (depth, env, expr, subst, typ, tv, scheme, t1, t2, rule, detail)
 import Types
 
--- Infer 是类型推断过程的小上下文：Int 用来发放新的类型变量，Either 用来提前返回错误。
-newtype Infer a = Infer { runInfer :: Int -> Either TypeError (a, Int) }
+newtype Infer a =
+  Infer { unInfer :: Int -> [TraceEvent] -> Either (TypeError, [TraceEvent]) (a, Int, [TraceEvent]) }
 
 instance Functor Infer where
-  fmap f action = Infer $ \supply ->
-    case runInfer action supply of
-      Left err -> Left err
-      Right (value, supply') -> Right (f value, supply')
+  fmap f (Infer action) = Infer $ \supply traceLog ->
+    case action supply traceLog of
+      Left errTrace -> Left errTrace
+      Right (value, supply', traceLog') -> Right (f value, supply', traceLog')
 
 instance Applicative Infer where
-  pure value = Infer $ \supply -> Right (value, supply)
-  sf <*> sx = Infer $ \supply ->
-    case runInfer sf supply of
-      Left err -> Left err
-      Right (f, supply1) ->
-        case runInfer sx supply1 of
-          Left err -> Left err
-          Right (x, supply2) -> Right (f x, supply2)
+  pure value = Infer $ \supply traceLog -> Right (value, supply, traceLog)
+  Infer sf <*> Infer sx = Infer $ \supply traceLog ->
+    case sf supply traceLog of
+      Left errTrace -> Left errTrace
+      Right (f, supply1, traceLog1) ->
+        case sx supply1 traceLog1 of
+          Left errTrace -> Left errTrace
+          Right (x, supply2, traceLog2) -> Right (f x, supply2, traceLog2)
 
 instance Monad Infer where
-  action >>= next = Infer $ \supply ->
-    case runInfer action supply of
-      Left err -> Left err
-      Right (value, supply') -> runInfer (next value) supply'
+  Infer action >>= next = Infer $ \supply traceLog ->
+    case action supply traceLog of
+      Left errTrace -> Left errTrace
+      Right (value, supply', traceLog') -> unInfer (next value) supply' traceLog'
 
 throwInfer :: TypeError -> Infer a
-throwInfer err = Infer $ \_ -> Left err
+throwInfer err = Infer $ \_supply traceLog -> Left (err, traceLog)
 
--- fresh 每次生成一个新的类型变量 a0、a1、a2...，代表“目前还不知道的类型”。
-fresh :: Infer Type
-fresh = Infer $ \supply -> Right (TVar ("a" ++ show supply), supply + 1)
+logTrace :: TraceEvent -> Infer ()
+logTrace ev = Infer $ \supply traceLog -> Right ((), supply, traceLog ++ [ev])
 
--- instantiate 使用一个多态类型时，把 forall 绑定的变量换成新的未知类型。
-instantiate :: Scheme -> Infer Type
-instantiate (Scheme vars t) = do
-  freshVars <- mapM (const fresh) vars
+logStep :: Int -> String -> Infer ()
+logStep d msg = logTrace (AlgoStep d msg)
+
+showEnv :: TypeEnv -> String
+showEnv env = "环境：" ++ show env
+
+inferPairMsg :: String -> Subst -> Type -> String
+inferPairMsg context s t =
+  context ++ "得到替换" ++ show s ++ "和类型" ++ show t
+
+composeResultMsg :: Subst -> Type -> String
+composeResultMsg s t =
+  "复合替换" ++ show s ++ "和类型" ++ show t
+
+runInferM :: Infer a -> Int -> Either TypeError (a, Int, [TraceEvent])
+runInferM (Infer action) supply =
+  case action supply [] of
+    Left (err, _) -> Left err
+    Right (value, supply', traceLog) -> Right (value, supply', traceLog)
+
+runInferMTrace :: Infer a -> Int -> Either (TypeError, [TraceEvent]) (a, Int, [TraceEvent])
+runInferMTrace (Infer action) supply = action supply []
+
+fresh :: Int -> Infer Type
+fresh d = Infer $ \supply traceLog ->
+  let tv = TVar ("a" ++ show supply)
+  in Right (tv, supply + 1, traceLog ++ [FreshVar d tv])
+
+instantiate :: Int -> Scheme -> Infer Type
+instantiate depth (Scheme vars t) = do
+  freshVars <- mapM (const (fresh depth)) vars
   let subst = Map.fromList (zip vars freshVars)
-  pure (apply subst t)
+      typ = apply subst t
+  logStep depth ("instantiate：生成新变量" ++ show freshVars ++ "并执行替换" ++ show subst ++ "，得到类型" ++ show typ)
+  pure typ
 
 inferTop :: Exp -> Either TypeError Scheme
-inferTop = inferTopWithEnv preludeEnv
+inferTop expr =
+  case runInferM (inferWithPrelude 0 expr) 0 of
+    Left err -> Left err
+    Right ((env, subst, t), _, _) ->
+      Right (generalize (apply subst env) (apply subst t))
 
--- inferTopWithEnv 是对外入口：推断表达式类型，并把可泛化的变量重新包装成 Scheme。
+inferWithPrelude :: Int -> Exp -> Infer (TypeEnv, Subst, Type)
+inferWithPrelude depth expr = do
+  logStep depth "preludeEnv：预定义环境，包含not和negate函数"
+  (subst, t) <- infer depth preludeEnv expr
+  pure (preludeEnv, subst, t)
+
 inferTopWithEnv :: TypeEnv -> Exp -> Either TypeError Scheme
 inferTopWithEnv env expr =
-  case runInfer (infer env expr) 0 of
+  case runInferM (infer 0 env expr) 0 of
     Left err -> Left err
-    Right ((subst, t), _) -> Right (generalize (apply subst env) (apply subst t))
+    Right ((subst, t), _, _) ->
+      Right (generalize (apply subst env) (apply subst t))
 
-infer :: TypeEnv -> Exp -> Infer (Subst, Type)
-infer env expr =
+infer :: Int -> TypeEnv -> Exp -> Infer (Subst, Type)
+infer depth env expr = do
+  logTrace (EnterInfer depth expr env)
+  result <- inferExpr depth env expr
+  let (subst, typ) = result
+  logTrace (ExitInfer depth subst typ)
+  pure result
+
+inferExpr :: Int -> TypeEnv -> Exp -> Infer (Subst, Type)
+inferExpr depth env expr =
   case expr of
-    -- 变量要先从环境里查类型；多态变量在每次使用时都要实例化。
-    EVar name ->
+    EVar name -> do
+      logStep depth ("EVar：变量 " ++ name)
       case lookupEnv env name of
-        Nothing -> throwInfer (UnboundVariable name)
-        Just scheme -> do
-          t <- instantiate scheme
+        Nothing -> do
+          logStep depth ("未找到绑定，错误：未绑定变量 " ++ name)
+          throwInfer (UnboundVariable name)
+        Just sch -> do
+          logStep depth ("lookup: 在环境中查找 " ++ name ++ "，得到多态方案scheme=" ++ show sch)
+          t <- instantiate depth sch
+          logStep depth (inferPairMsg ("变量 " ++ name ++ " ") nullSubst t)
           pure (nullSubst, t)
 
     ELit lit ->
-      pure (nullSubst, inferLit lit)
+      case lit of
+        LInt n -> do
+          logStep depth ("ELit：整数字面量 " ++ show n)
+          logStep depth (inferPairMsg "字面量" nullSubst TInt)
+          pure (nullSubst, TInt)
+        LBool b -> do
+          logStep depth ("ELit：布尔字面量 " ++ show b)
+          logStep depth (inferPairMsg "字面量" nullSubst TBool)
+          pure (nullSubst, TBool)
 
-    -- lambda 的参数先给一个新类型变量，再用函数体里的约束慢慢确定它。
     EAbs name body -> do
-      tv <- fresh
+      logStep depth ("EAbs：λ" ++ name ++ ". …")
+      tv <- fresh depth
       let env' = extend (remove env name) name (Scheme [] tv)
-      (s1, t1) <- infer env' body
-      pure (s1, TFun (apply s1 tv) t1)
+      logStep depth ("extend: 用" ++ name ++ "和新变量" ++ show tv ++ "扩展环境。" ++ showEnv env')
+      (s1, t1) <- infer (depth + 1) env' body
+      let resultType = TFun (apply s1 tv) t1
+      logStep depth (inferPairMsg "lambda " s1 resultType)
+      pure (s1, resultType)
 
-    -- 函数调用要求左边的类型能统一成“参数类型 -> 返回类型”。
     EApp fun arg -> do
-      tv <- fresh
-      (s1, tFun) <- infer env fun
-      (s2, tArg) <- infer (apply s1 env) arg
-      s3 <- mgu (apply s2 tFun) (TFun tArg tv)
-      pure (s3 `composeSubst` s2 `composeSubst` s1, apply s3 tv)
+      logStep depth "EApp：函数应用"
+      tv <- fresh depth
+      (s1, tFun) <- infer (depth + 1) env fun
+      logStep depth (inferPairMsg "推断函数 " s1 tFun)
+      let env1 = apply s1 env
+      logStep depth ("在" ++ showEnv env1 ++ " 下推断函数参数")
+      (s2, tArg) <- infer (depth + 1) env1 arg
+      logStep depth (inferPairMsg "推断函数参数" s2 tArg)
+      let appliedFun = apply s2 tFun
+          expected = TFun tArg tv
+      logStep depth
+        ( "合一约束：tFun ~ tArg -> tv，即 "
+            ++ show appliedFun
+            ++ " ~ "
+            ++ show expected
+        )
+      s3 <- mgu depth appliedFun expected
+      let resultType = apply s3 tv
+          resultSubst = s3 `composeSubst` s2 `composeSubst` s1
+      logStep depth (composeResultMsg resultSubst resultType)
+      pure (resultSubst, resultType)
 
-    -- let 先推断绑定值并 generalize，再带着这个多态绑定检查 body。
     ELet name value body -> do
-      (s1, t1) <- infer env value
+      logStep depth ("ELet：let " ++ name ++ " = … in …")
+      (s1, t1) <- infer (depth + 1) env value
+      logStep depth (inferPairMsg "推断 value " s1 t1)
       let envAfterValue = apply s1 env
-          scheme = generalize envAfterValue t1
-          envForBody = extend (remove envAfterValue name) name scheme
-      (s2, t2) <- infer envForBody body
-      pure (s2 `composeSubst` s1, t2)
+      logStep depth ("应用替换到环境，更新环境。" ++ showEnv envAfterValue)
+      let scheme = generalize envAfterValue t1
+      logTrace (GeneralizeE depth t1 scheme)
+      let envForBody = extend (remove envAfterValue name) name scheme
+      logStep depth ("extend: 用" ++ name ++ "和新变量" ++ show scheme ++ "扩展环境。" ++ showEnv envForBody)
+      (s2, t2) <- infer (depth + 1) envForBody body
+      logStep depth (inferPairMsg "推断函数体" s2 t2)
+      let resultSubst = s2 `composeSubst` s1
+      logStep depth (composeResultMsg resultSubst t2)
+      pure (resultSubst, t2)
 
-    -- if 要求条件是 Bool，并要求 then/else 两个分支最终类型一致。
     EIf cond yes no -> do
-      (s1, tCond) <- infer env cond
-      sBool <- mgu tCond TBool
+      logStep depth "EIf：条件表达式"
+      (s1, tCond) <- infer (depth + 1) env cond
+      logStep depth (inferPairMsg "推断条件condition" s1 tCond)
+      logStep depth ("合一约束：tCond ~ Bool，即 " ++ show tCond ++ " ~ Bool")
+      sBool <- mgu depth tCond TBool
       let sCond = sBool `composeSubst` s1
-      (s2, tYes) <- infer (apply sCond env) yes
-      (s3, tNo) <- infer (apply (s2 `composeSubst` sCond) env) no
-      s4 <- mgu (apply s3 tYes) tNo
-      pure (s4 `composeSubst` s3 `composeSubst` s2 `composeSubst` sCond, apply s4 tNo)
+      logStep depth ("复合替换sCond=" ++ show sCond)
+      let envCond = apply sCond env
+      logStep depth ("在" ++ showEnv envCond ++ " 下推断 then 分支")
+      (s2, tYes) <- infer (depth + 1) envCond yes
+      logStep depth (inferPairMsg "推断 then 分支 " s2 tYes)
+      let envElse = apply (s2 `composeSubst` sCond) env
+      logStep depth ("在" ++ showEnv envElse ++ " 下推断 else 分支")
+      (s3, tNo) <- infer (depth + 1) envElse no
+      logStep depth (inferPairMsg "推断 else 分支 " s3 tNo)
+      logStep depth
+        ( "合一约束：s3(tYes) ~ tNo，即 "
+            ++ show (apply s3 tYes)
+            ++ " ~ "
+            ++ show tNo
+        )
+      s4 <- mgu depth (apply s3 tYes) tNo
+      let resultSubst = s4 `composeSubst` s3 `composeSubst` s2 `composeSubst` sCond
+          resultType = apply s4 tNo
+      logStep depth (composeResultMsg resultSubst resultType)
+      pure (resultSubst, resultType)
 
     EBin op left right ->
-      inferBin env op left right
+      inferBin depth env op left right
 
-    -- 列表会要求所有元素拥有同一种类型。
     EList items ->
-      inferList env items
+      inferList depth env items
 
-    -- 伪代码 block 按语句顺序更新环境，最后读取输出变量的类型。
     EBlock stmts outputName -> do
-      (s1, env') <- inferStmts env stmts
+      (s1, env') <- inferStmts depth env stmts
       case lookupEnv (apply s1 env') outputName of
         Nothing -> throwInfer (UnboundVariable outputName)
         Just scheme -> do
-          t <- instantiate scheme
+          t <- instantiate depth scheme
           pure (s1, t)
 
-inferLit :: Lit -> Type
-inferLit (LInt _) = TInt
-inferLit (LBool _) = TBool
-
--- 空列表的元素类型暂时未知；非空列表用第一个元素约束后续元素。
-inferList :: TypeEnv -> [Exp] -> Infer (Subst, Type)
-inferList _ [] = do
-  tv <- fresh
+inferList :: Int -> TypeEnv -> [Exp] -> Infer (Subst, Type)
+inferList depth _ [] = do
+  tv <- fresh depth
   pure (nullSubst, TList tv)
-inferList env (item:items) = do
-  (s1, itemType) <- infer env item
-  inferListRest (apply s1 env) s1 itemType items
+inferList depth env (item:items) = do
+  (s1, itemType) <- infer (depth + 1) env item
+  inferListRest depth (apply s1 env) s1 itemType items
 
-inferListRest :: TypeEnv -> Subst -> Type -> [Exp] -> Infer (Subst, Type)
-inferListRest _ subst itemType [] =
+inferListRest :: Int -> TypeEnv -> Subst -> Type -> [Exp] -> Infer (Subst, Type)
+inferListRest _ _ subst itemType [] =
   pure (subst, TList (apply subst itemType))
-inferListRest env subst itemType (item:items) = do
-  (sItem, nextType) <- infer env item
-  sSame <- mgu (apply sItem itemType) nextType
+inferListRest depth env subst itemType (item:items) = do
+  (sItem, nextType) <- infer (depth + 1) env item
+  sSame <- mgu depth (apply sItem itemType) nextType
   let subst' = sSame `composeSubst` sItem `composeSubst` subst
       env' = apply subst' env
       itemType' = apply subst' itemType
-  inferListRest env' subst' itemType' items
+  inferListRest depth env' subst' itemType' items
 
--- 语句推断的结果不是一个值类型，而是更新后的 TypeEnv。
-inferStmts :: TypeEnv -> [Stmt] -> Infer (Subst, TypeEnv)
-inferStmts env [] = pure (nullSubst, env)
-inferStmts env (stmt:stmts) = do
-  (s1, env1) <- inferStmt env stmt
-  (s2, env2) <- inferStmts (apply s1 env1) stmts
+inferStmts :: Int -> TypeEnv -> [Stmt] -> Infer (Subst, TypeEnv)
+inferStmts _ env [] = pure (nullSubst, env)
+inferStmts depth env (stmt:stmts) = do
+  (s1, env1) <- inferStmt depth env stmt
+  (s2, env2) <- inferStmts depth (apply s1 env1) stmts
   pure (s2 `composeSubst` s1, env2)
 
-inferStmt :: TypeEnv -> Stmt -> Infer (Subst, TypeEnv)
-inferStmt env stmt =
+inferStmt :: Int -> TypeEnv -> Stmt -> Infer (Subst, TypeEnv)
+inferStmt depth env stmt =
   case stmt of
-    SAssign name expr -> inferAssign env name expr
+    SAssign name expr -> inferAssign depth env name expr
 
-    -- block if 会分别推断两个分支，再合并两个分支对变量类型的约束。
     SIfStmt cond yes no -> do
-      (s1, tCond) <- infer env cond
-      sBool <- mgu tCond TBool
+      (s1, tCond) <- infer (depth + 1) env cond
+      sBool <- mgu depth tCond TBool
       let sCond = sBool `composeSubst` s1
           envCond = apply sCond env
-      (sYes, envYes) <- inferStmts envCond yes
-      (sNo, envNo) <- inferStmts envCond no
-      sMerge <- mergeEnvs (apply sNo envYes) (apply sYes envNo)
+      (sYes, envYes) <- inferStmts depth envCond yes
+      (sNo, envNo) <- inferStmts depth envCond no
+      sMerge <- mergeEnvs depth (apply sNo envYes) (apply sYes envNo)
       pure (sMerge `composeSubst` sNo `composeSubst` sYes `composeSubst` sCond, apply sMerge (apply sNo envYes))
 
-    -- switch 先检查被匹配对象，再要求每个 case 值能和它统一。
     SSwitchStmt subject cases otherwiseBranch -> do
-      (sSubject, tSubject) <- infer env subject
-      (sCases, envCases) <- inferCases (apply sSubject env) (apply sSubject tSubject) cases
-      (sOtherwise, envOtherwise) <- inferStmts (apply sCases (apply sSubject env)) otherwiseBranch
-      sMerge <- mergeEnvs (apply sOtherwise envCases) envOtherwise
+      (sSubject, tSubject) <- infer (depth + 1) env subject
+      (sCases, envCases) <- inferCases depth (apply sSubject env) (apply sSubject tSubject) cases
+      (sOtherwise, envOtherwise) <- inferStmts depth (apply sCases (apply sSubject env)) otherwiseBranch
+      sMerge <- mergeEnvs depth (apply sOtherwise envCases) envOtherwise
       pure (sMerge `composeSubst` sOtherwise `composeSubst` sCases `composeSubst` sSubject, apply sMerge (apply sOtherwise envCases))
 
-    -- for 要求被遍历对象是列表，并把循环变量绑定成列表元素类型。
     SFor itemName items body -> do
-      tv <- fresh
-      (sItems, tItems) <- infer env items
-      sList <- mgu tItems (TList tv)
+      tv <- fresh depth
+      (sItems, tItems) <- infer (depth + 1) env items
+      sList <- mgu depth tItems (TList tv)
       let sLoop = sList `composeSubst` sItems
           itemType = apply sLoop tv
           envLoop = extend (remove (apply sLoop env) itemName) itemName (Scheme [] itemType)
-      (sBody, envBody) <- inferStmts envLoop body
+      (sBody, envBody) <- inferStmts depth envLoop body
       pure (sBody `composeSubst` sLoop, remove envBody itemName)
 
-    -- while 条件必须是 Bool，循环体里的赋值会继续更新环境。
     SWhile cond body -> do
-      (sCond, tCond) <- infer env cond
-      sBool <- mgu tCond TBool
+      (sCond, tCond) <- infer (depth + 1) env cond
+      sBool <- mgu depth tCond TBool
       let sLoop = sBool `composeSubst` sCond
-      (sBody, envBody) <- inferStmts (apply sLoop env) body
+      (sBody, envBody) <- inferStmts depth (apply sLoop env) body
       pure (sBody `composeSubst` sLoop, envBody)
 
--- 赋值第一次出现时会扩展环境；重复赋值时必须和旧类型统一。
-inferAssign :: TypeEnv -> String -> Exp -> Infer (Subst, TypeEnv)
-inferAssign env name expr = do
-  (s1, tExpr) <- infer env expr
+inferAssign :: Int -> TypeEnv -> String -> Exp -> Infer (Subst, TypeEnv)
+inferAssign depth env name expr = do
+  (s1, tExpr) <- infer (depth + 1) env expr
   let envAfterExpr = apply s1 env
   case lookupEnv envAfterExpr name of
     Nothing ->
       pure (s1, extend envAfterExpr name (Scheme [] tExpr))
     Just scheme -> do
-      tOld <- instantiate scheme
-      sSame <- mgu tOld tExpr
+      tOld <- instantiate depth scheme
+      sSame <- mgu depth tOld tExpr
       let subst = sSame `composeSubst` s1
       pure (subst, extend (apply subst env) name (Scheme [] (apply subst tExpr)))
 
-inferCases :: TypeEnv -> Type -> [(Exp, [Stmt])] -> Infer (Subst, TypeEnv)
-inferCases env _ [] = pure (nullSubst, env)
-inferCases env subjectType ((caseExpr, body):cases) = do
-  (sCase, tCase) <- infer env caseExpr
-  sSame <- mgu (apply sCase subjectType) tCase
+inferCases :: Int -> TypeEnv -> Type -> [(Exp, [Stmt])] -> Infer (Subst, TypeEnv)
+inferCases _ env _ [] = pure (nullSubst, env)
+inferCases depth env subjectType ((caseExpr, body):cases) = do
+  (sCase, tCase) <- infer (depth + 1) env caseExpr
+  sSame <- mgu depth (apply sCase subjectType) tCase
   let sHead = sSame `composeSubst` sCase
       envHead = apply sHead env
-  (sBody, envBody) <- inferStmts envHead body
-  (sRest, envRest) <- inferCases (apply sBody envHead) (apply sBody (apply sHead subjectType)) cases
-  sMerge <- mergeEnvs (apply sRest envBody) envRest
+  (sBody, envBody) <- inferStmts depth envHead body
+  (sRest, envRest) <- inferCases depth (apply sBody envHead) (apply sBody (apply sHead subjectType)) cases
+  sMerge <- mergeEnvs depth (apply sRest envBody) envRest
   pure (sMerge `composeSubst` sRest `composeSubst` sBody `composeSubst` sHead, apply sMerge (apply sRest envBody))
 
--- 合并两个分支环境时，同名变量在两边出现就必须能统一成同一种类型。
-mergeEnvs :: TypeEnv -> TypeEnv -> Infer Subst
-mergeEnvs (TypeEnv left) (TypeEnv right) =
+mergeEnvs :: Int -> TypeEnv -> TypeEnv -> Infer Subst
+mergeEnvs depth (TypeEnv left) (TypeEnv right) =
   mergeNames nullSubst (Map.keysSet left `Set.union` Map.keysSet right)
   where
     mergeNames subst names =
@@ -237,72 +329,120 @@ mergeEnvs (TypeEnv left) (TypeEnv right) =
         Just (name, rest) ->
           case (Map.lookup name left, Map.lookup name right) of
             (Just sLeft, Just sRight) -> do
-              tLeft <- instantiate sLeft
-              tRight <- instantiate sRight
-              sSame <- mgu (apply subst tLeft) (apply subst tRight)
+              tLeft <- instantiate depth sLeft
+              tRight <- instantiate depth sRight
+              sSame <- mgu depth (apply subst tLeft) (apply subst tRight)
               mergeNames (sSame `composeSubst` subst) rest
             _ -> mergeNames subst rest
 
--- 二元运算先推断左右表达式，再按运算符选择 Int、Bool 或相等性约束。
-inferBin :: TypeEnv -> BinOp -> Exp -> Exp -> Infer (Subst, Type)
-inferBin env op left right = do
-  (s1, tLeft) <- infer env left
-  (s2, tRight) <- infer (apply s1 env) right
+inferBin :: Int -> TypeEnv -> BinOp -> Exp -> Exp -> Infer (Subst, Type)
+inferBin depth env op left right = do
+  logStep depth ("EBin：二元运算 " ++ show op)
+  (s1, tLeft) <- infer (depth + 1) env left
+  logStep depth (inferPairMsg "推断左操作数 " s1 tLeft)
+  let env1 = apply s1 env
+  logStep depth ("在" ++ showEnv env1 ++ " 下推断右操作数")
+  (s2, tRight) <- infer (depth + 1) env1 right
+  logStep depth (inferPairMsg "推断右操作数 " s2 tRight)
   case op of
-    Add -> inferIntBin s1 s2 tLeft tRight
-    Sub -> inferIntBin s1 s2 tLeft tRight
-    Mul -> inferIntBin s1 s2 tLeft tRight
-    Div -> inferIntBin s1 s2 tLeft tRight
-    And -> inferBoolBin s1 s2 tLeft tRight
-    Or -> inferBoolBin s1 s2 tLeft tRight
-    Eq -> do
-      s3 <- mgu (apply s2 tLeft) tRight
-      pure (s3 `composeSubst` s2 `composeSubst` s1, TBool)
-    Ne -> do
-      s3 <- mgu (apply s2 tLeft) tRight
-      pure (s3 `composeSubst` s2 `composeSubst` s1, TBool)
-    Lt -> inferIntCompare s1 s2 tLeft tRight
-    Le -> inferIntCompare s1 s2 tLeft tRight
-    Gt -> inferIntCompare s1 s2 tLeft tRight
-    Ge -> inferIntCompare s1 s2 tLeft tRight
+    Add -> inferIntBin depth s1 s2 tLeft tRight
+    Sub -> inferIntBin depth s1 s2 tLeft tRight
+    Mul -> inferIntBin depth s1 s2 tLeft tRight
+    Div -> inferIntBin depth s1 s2 tLeft tRight
+    And -> inferBoolBin depth s1 s2 tLeft tRight
+    Or -> inferBoolBin depth s1 s2 tLeft tRight
+    Eq -> inferEqBin depth s1 s2 tLeft tRight
+    Ne -> inferEqBin depth s1 s2 tLeft tRight
+    Lt -> inferIntCompare depth s1 s2 tLeft tRight
+    Le -> inferIntCompare depth s1 s2 tLeft tRight
+    Gt -> inferIntCompare depth s1 s2 tLeft tRight
+    Ge -> inferIntCompare depth s1 s2 tLeft tRight
 
-inferIntBin :: Subst -> Subst -> Type -> Type -> Infer (Subst, Type)
-inferIntBin s1 s2 tLeft tRight = do
-  s3 <- mgu (apply s2 tLeft) TInt
-  s4 <- mgu (apply s3 tRight) TInt
-  pure (s4 `composeSubst` s3 `composeSubst` s2 `composeSubst` s1, TInt)
+inferEqBin :: Int -> Subst -> Subst -> Type -> Type -> Infer (Subst, Type)
+inferEqBin depth s1 s2 tLeft tRight = do
+  logStep depth
+    ( "(==) 合一约束：s2(tLeft) ~ tRight，即 "
+        ++ show (apply s2 tLeft)
+        ++ " ~ "
+        ++ show tRight
+    )
+  s3 <- mgu depth (apply s2 tLeft) tRight
+  let resultSubst = s3 `composeSubst` s2 `composeSubst` s1
+  logStep depth (composeResultMsg resultSubst TBool)
+  pure (resultSubst, TBool)
 
-inferBoolBin :: Subst -> Subst -> Type -> Type -> Infer (Subst, Type)
-inferBoolBin s1 s2 tLeft tRight = do
-  s3 <- mgu (apply s2 tLeft) TBool
-  s4 <- mgu (apply s3 tRight) TBool
-  pure (s4 `composeSubst` s3 `composeSubst` s2 `composeSubst` s1, TBool)
+inferIntBin :: Int -> Subst -> Subst -> Type -> Type -> Infer (Subst, Type)
+inferIntBin depth s1 s2 tLeft tRight = do
+  logStep depth
+    ("算术合一：s2(tLeft) ~ Int，即 " ++ show (apply s2 tLeft) ++ " ~ Int")
+  s3 <- mgu depth (apply s2 tLeft) TInt
+  logStep depth
+    ("算术合一：s3(tRight) ~ Int，即 " ++ show (apply s3 tRight) ++ " ~ Int")
+  s4 <- mgu depth (apply s3 tRight) TInt
+  let resultSubst = s4 `composeSubst` s3 `composeSubst` s2 `composeSubst` s1
+  logStep depth (composeResultMsg resultSubst TInt)
+  pure (resultSubst, TInt)
 
-inferIntCompare :: Subst -> Subst -> Type -> Type -> Infer (Subst, Type)
-inferIntCompare s1 s2 tLeft tRight = do
-  s3 <- mgu (apply s2 tLeft) TInt
-  s4 <- mgu (apply s3 tRight) TInt
-  pure (s4 `composeSubst` s3 `composeSubst` s2 `composeSubst` s1, TBool)
+inferBoolBin :: Int -> Subst -> Subst -> Type -> Type -> Infer (Subst, Type)
+inferBoolBin depth s1 s2 tLeft tRight = do
+  logStep depth
+    ("逻辑合一：s2(tLeft) ~ Bool，即 " ++ show (apply s2 tLeft) ++ " ~ Bool")
+  s3 <- mgu depth (apply s2 tLeft) TBool
+  logStep depth
+    ("逻辑合一：s3(tRight) ~ Bool，即 " ++ show (apply s3 tRight) ++ " ~ Bool")
+  s4 <- mgu depth (apply s3 tRight) TBool
+  let resultSubst = s4 `composeSubst` s3 `composeSubst` s2 `composeSubst` s1
+  logStep depth (composeResultMsg resultSubst TBool)
+  pure (resultSubst, TBool)
 
--- mgu 是“最一般合一”：找到让两个类型相等所需的最小替换表。
-mgu :: Type -> Type -> Infer Subst
-mgu (TFun left right) (TFun left' right') = do
-  s1 <- mgu left left'
-  s2 <- mgu (apply s1 right) (apply s1 right')
+inferIntCompare :: Int -> Subst -> Subst -> Type -> Type -> Infer (Subst, Type)
+inferIntCompare depth s1 s2 tLeft tRight = do
+  logStep depth
+    ("比较合一：s2(tLeft) ~ Int，即 " ++ show (apply s2 tLeft) ++ " ~ Int")
+  s3 <- mgu depth (apply s2 tLeft) TInt
+  logStep depth
+    ("比较合一：s3(tRight) ~ Int，即 " ++ show (apply s3 tRight) ++ " ~ Int")
+  s4 <- mgu depth (apply s3 tRight) TInt
+  let resultSubst = s4 `composeSubst` s3 `composeSubst` s2 `composeSubst` s1
+  logStep depth (composeResultMsg resultSubst TBool)
+  pure (resultSubst, TBool)
+
+mgu :: Int -> Type -> Type -> Infer Subst
+mgu depth t1 t2 = do
+  logTrace (UnifyStart depth t1 t2)
+  result <- mguImpl depth t1 t2
+  logTrace (UnifyDone depth result)
+  pure result
+
+mguImpl :: Int -> Type -> Type -> Infer Subst
+mguImpl depth (TFun left right) (TFun left' right') = do
+  logStep depth "mgu：分解函数，输入、返回分别合一"
+  s1 <- mgu (depth + 1) left left'
+  s2 <- mgu (depth + 1) (apply s1 right) (apply s1 right')
   pure (s2 `composeSubst` s1)
-mgu (TVar name) t = bindVar name t
-mgu t (TVar name) = bindVar name t
-mgu TInt TInt = pure nullSubst
-mgu TBool TBool = pure nullSubst
-mgu (TList left) (TList right) = mgu left right
-mgu t1 t2 = throwInfer (TypesDoNotUnify t1 t2)
+mguImpl depth (TVar name) t = bindVar depth name t
+mguImpl depth t (TVar name) = bindVar depth name t
+mguImpl _ TInt TInt =
+  pure nullSubst
+mguImpl _ TBool TBool =
+  pure nullSubst
+mguImpl depth (TList left) (TList right) =
+  mgu (depth + 1) left right
+mguImpl _ t1 t2 = throwInfer (TypesDoNotUnify t1 t2)
 
--- bindVar 把类型变量绑定到具体类型；occurs check 防止 a = a -> b 这样的无限类型。
-bindVar :: String -> Type -> Infer Subst
-bindVar name t
-  | t == TVar name = pure nullSubst
-  | name `Set.member` ftv t = throwInfer (InfiniteType name t)
-  | otherwise = pure (Map.singleton name t)
+bindVar :: Int -> String -> Type -> Infer Subst
+bindVar depth name t
+  | t == TVar name = do
+      logStep depth ("varBind：" ++ name ++ " 与自身相同，得到空替换[]")
+      pure nullSubst
+  | name `Set.member` ftv t = do
+      logStep depth
+        ("occurs check 失败：" ++ name ++ " 出现在ftv(" ++ show t ++ ") 中")
+      throwInfer (InfiniteType name t)
+  | otherwise = do
+      let s = Map.singleton name t
+      logStep depth ("varBind：绑定 " ++ name ++ " -> " ++ show t ++ "，得到替换" ++ show s)
+      pure s
 
 preludeEnv :: TypeEnv
 preludeEnv =

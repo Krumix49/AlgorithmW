@@ -3,16 +3,70 @@ name:               algorithm-w-reimpl
 version:            0.1.0.0
 build-type:         Simple
 
-executable algorithm-w
-  main-is:          Main.hs
-  hs-source-dirs:   app, src
-  other-modules:
-      Infer
-      Parser
+library
+  hs-source-dirs:   src
+  exposed-modules:
       Syntax
       Types
+      Parser
+      Infer
+      TraceEvents
+      Derivation.CourseRules
+      Derivation.InferExamples
+      Derivation.Render
+      Derivation.Trace
+      Web.TraceHtml
+      Web.AstHtml
+      Web.Page
   build-depends:
       base >=4.18 && <5
     , containers
+    , blaze-html >=0.9 && <0.10
+    , text >=2.0 && <2.2
+    , bytestring >=0.11 && <0.13
   default-language: Haskell2010
   ghc-options: -Wall
+
+executable algorithm-w
+  main-is:          Main.hs
+  hs-source-dirs:   app
+  build-depends:
+      algorithm-w-reimpl
+    , base >=4.18 && <5
+  default-language: Haskell2010
+  ghc-options: -Wall
+
+executable algorithm-w-trace
+  main-is:          TraceMain.hs
+  hs-source-dirs:   app
+  build-depends:
+      algorithm-w-reimpl
+    , base >=4.18 && <5
+  default-language: Haskell2010
+  ghc-options: -Wall
+
+executable algorithm-w-web
+  main-is:          WebMain.hs
+  hs-source-dirs:   app
+  build-depends:
+      algorithm-w-reimpl
+    , base >=4.18 && <5
+    , scotty >=0.22 && <0.23
+    , warp >=3.3 && <3.5
+    , blaze-html >=0.9 && <0.10
+    , bytestring >=0.11 && <0.13
+    , text >=2.0 && <2.2
+  default-language: Haskell2010
+  ghc-options: -Wall -threaded
+
+test-suite infer-display
+  type:             exitcode-stdio-1.0
+  main-is:          Main.hs
+  hs-source-dirs:   test
+  build-depends:
+      algorithm-w-reimpl
+    , base
+    , tasty >= 1.4 && <1.6
+    , tasty-hunit >= 0.10 && <0.11
+  default-language: Haskell2010
+  ghc-options:      -Wall
