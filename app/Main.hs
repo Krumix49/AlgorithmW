@@ -10,6 +10,7 @@ import Parser
 import Syntax
 import Types
 
+-- Options 保存命令行解析后的配置，main 后面只需要读这个结构。
 data Options = Options
   { optVerbose :: Bool
   , optHelp :: Bool
@@ -17,6 +18,7 @@ data Options = Options
   , optExpressionParts :: [String]
   }
 
+-- 默认进入 REPL；只有用户显式传参数时才改成文件或表达式模式。
 defaultOptions :: Options
 defaultOptions = Options
   { optVerbose = False
@@ -36,6 +38,7 @@ examples =
   , ("calling an integer", "2 2")
   ]
 
+-- main 是 CLI 入口：先解析参数，再决定运行帮助、文件分析、REPL 或单表达式分析。
 main :: IO ()
 main = do
   args <- getArgs
@@ -54,6 +57,7 @@ main = do
           ok <- analyzeExpression (optVerbose options) (unwords (optExpressionParts options))
           if ok then pure () else exitFailure
 
+-- parseOptions 只处理命令行形状，不做类型推断或文件读取。
 parseOptions :: [String] -> Either String Options
 parseOptions = go defaultOptions
   where
@@ -74,6 +78,7 @@ prefixOf [] _ = True
 prefixOf _ [] = False
 prefixOf (x:xs) (y:ys) = x == y && prefixOf xs ys
 
+-- repl 循环读取一行表达式，并复用 analyzeExpression 做解析和类型推断。
 repl :: Bool -> IO ()
 repl verbose = do
   putStrLn "请输入表达式。输入 :quit 退出，:help 查看帮助，:examples 运行示例。"
@@ -101,6 +106,7 @@ runExample (label, source) = do
   _ <- analyzeExpression True source
   putStrLn ""
 
+-- analyzeExpression 是 REPL 和 .aw 文件共用的标准表达式分析入口。
 analyzeExpression :: Bool -> String -> IO Bool
 analyzeExpression verbose source =
   case parseExpressionTrace source of
@@ -113,6 +119,7 @@ analyzeExpression verbose source =
         Left err -> putStrLn ("类型检查失败：" ++ show err) >> pure False
         Right scheme -> putStrLn ("推断类型：" ++ show scheme) >> pure True
 
+-- analyzeFile 根据文件后缀选择解析方式：.aw 是表达式，.pseudo 是伪代码函数集。
 analyzeFile :: Bool -> FilePath -> String -> IO Bool
 analyzeFile verbose path source
   | ".pseudo" `suffixOfCI` path = analyzePseudoFile verbose path source
@@ -130,6 +137,7 @@ suffixOfCI suffix value = reverse (lower suffix) `prefixOf` reverse (lower value
   where
     lower = map toLower
 
+-- .pseudo 文件会先解析出多个函数，再按顺序把前面函数加入环境供后面函数调用。
 analyzePseudoFile :: Bool -> FilePath -> String -> IO Bool
 analyzePseudoFile verbose path source =
   case parsePseudoFileTrace source of
@@ -143,6 +151,7 @@ analyzePseudoFile verbose path source =
       putStrLn ""
       analyzeFunctions verbose preludeEnv functions True
 
+-- analyzeFunctions 逐个推断函数类型；成功的函数会进入环境，失败的函数会继续报告后续结果。
 analyzeFunctions :: Bool -> TypeEnv -> [PseudoFunction] -> Bool -> IO Bool
 analyzeFunctions _ _ [] ok = pure ok
 analyzeFunctions verbose env (fn:fns) ok = do
@@ -165,6 +174,7 @@ analyzeFunctions verbose env (fn:fns) ok = do
       putStrLn ""
       analyzeFunctions verbose env' fns ok
 
+-- printExpressionTrace 用面向学习者的方式展示“源码 -> Token -> AST -> 类型推断”的过程。
 printExpressionTrace :: ParseTrace -> IO ()
 printExpressionTrace trace = do
   putStrLn "[详细解析] 第 1 步：我先读到这段输入"
@@ -175,8 +185,9 @@ printExpressionTrace trace = do
   putStr (describeExp (traceExp trace))
   putStrLn "[详细解析] 第 4 步：整理成内部统一使用的表达式"
   putStrLn ("  " ++ renderExp (traceExp trace))
-  putStrLn "[详细解析] 第 5 步：接下来把这个表达式交给 Algorithm W 推断类型"
+  putStrLn "[详细解析] 第 5 步：接下来由 Pseudo-W 调用 Algorithm W 核心算法来推断类型"
 
+-- printFunctionTrace 展示伪代码函数如何被理解成内部表达式。
 printFunctionTrace :: PseudoFunction -> Exp -> IO ()
 printFunctionTrace fn expr = do
   putStrLn ("[详细解析] 函数：" ++ pseudoName fn ++ "，从第 " ++ show (pseudoStartLine fn) ++ " 行开始")
@@ -188,6 +199,7 @@ printFunctionTrace fn expr = do
   putStr (indent (describeExp expr))
   putStrLn ("  规范化函数表达式：" ++ renderExp expr)
 
+-- describeExp 不参与推断，只把 AST 翻译成适合初学者阅读的中文说明。
 describeExp :: Exp -> String
 describeExp = unlines . describe 0
   where
@@ -273,7 +285,8 @@ describeExp = unlines . describe 0
 
 usage :: IO ()
 usage = do
-  putStrLn "Algorithm W / Pseudo-W"
+  putStrLn "Pseudo-W"
+  putStrLn "  一个基于 Algorithm W 核心算法的 MATLAB-like 伪代码类型检查器"
   putStrLn ""
   putStrLn "用法："
   putStrLn "  cabal run algorithm-w"

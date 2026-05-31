@@ -17,6 +17,7 @@ module Types
 import qualified Data.Map.Strict as Map
 import qualified Data.Set as Set
 
+-- Type 是 Algorithm W 推断出来的类型形状：类型变量、基础类型、函数类型和列表类型。
 data Type
   = TVar String
   | TInt
@@ -28,8 +29,10 @@ data Type
 data Scheme = Scheme [String] Type  -- 带forall的多态类型
   deriving (Eq, Ord)
 
+-- Subst 是“类型变量名 -> 具体类型”的替换表，统一类型时会不断产生它。
 type Subst = Map.Map String Type
 
+-- TypeEnv 是当前作用域里的变量类型表，例如 x : Int 或 id : forall a. a -> a。
 newtype TypeEnv = TypeEnv (Map.Map String Scheme)
   deriving (Eq, Show)
 
@@ -40,6 +43,7 @@ data TypeError
   | ParseFailure String  -- 源码的语法不合法
   deriving (Eq)
 
+-- Types 抽象出两件事：找自由类型变量 ftv，以及把替换表 apply 到结构上。
 class Types a where
   ftv :: a -> Set.Set String
   apply :: Subst -> a -> a
@@ -78,6 +82,7 @@ instance Types TypeEnv where
 nullSubst :: Subst
 nullSubst = Map.empty
 
+-- 组合两个替换表：先应用 s1 修正 s2 里的旧结果，再保留 s1 的新约束。
 composeSubst :: Subst -> Subst -> Subst
 composeSubst s1 s2 = Map.map (apply s1) s2 `Map.union` s1
 
@@ -93,6 +98,7 @@ remove (TypeEnv env) name = TypeEnv (Map.delete name env)
 lookupEnv :: TypeEnv -> String -> Maybe Scheme
 lookupEnv (TypeEnv env) name = Map.lookup name env
 
+-- generalize 把“不依赖当前环境”的类型变量提升成 forall 变量，实现 let 多态。
 generalize :: TypeEnv -> Type -> Scheme
 generalize env t = Scheme vars t
   where

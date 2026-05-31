@@ -5,6 +5,7 @@ module Syntax
   , Stmt(..)
   ) where
 
+-- Exp 是这个小语言的表达式 AST：解析器把源码变成它，类型推断器再检查它。
 data Exp
   = EVar String
   | ELit Lit
@@ -17,6 +18,7 @@ data Exp
   | EBlock [Stmt] String
   deriving (Eq, Ord)
 
+-- Stmt 表示伪代码文件里的语句。它们只出现在 EBlock 里，最后通过输出变量取结果类型。
 data Stmt
   = SAssign String Exp
   | SIfStmt Exp [Stmt] [Stmt]
@@ -25,11 +27,13 @@ data Stmt
   | SWhile Exp [Stmt]
   deriving (Eq, Ord)
 
+-- Lit 是不用查环境就能知道类型的字面量。
 data Lit
   = LInt Integer
   | LBool Bool
   deriving (Eq, Ord)
 
+-- BinOp 只记录运算符种类；每个运算符需要什么类型由 Infer.hs 决定。
 data BinOp
   = Add
   | Sub
@@ -67,6 +71,7 @@ instance Show BinOp where
   show And = "&&"
   show Or = "||"
 
+-- Show 实例把内部 AST 重新打印成接近源码的形式，方便调试和 verbose 输出。
 showExp :: Int -> Exp -> String
 showExp _ (EVar name) = name
 showExp _ (ELit lit) = show lit
@@ -101,10 +106,12 @@ binPrec Sub = 4
 binPrec Mul = 5
 binPrec Div = 5
 
+-- 根据父表达式优先级决定是否补括号，避免打印结果改变原表达式含义。
 parensIf :: Bool -> String -> String
 parensIf True s = "(" ++ s ++ ")"
 parensIf False s = s
 
+-- 伪代码语句也有自己的打印形式，用来展示 EBlock 的规范化结果。
 showStmt :: Stmt -> String
 showStmt (SAssign name expr) =
   name ++ " = " ++ showExp 0 expr

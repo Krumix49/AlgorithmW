@@ -12,6 +12,7 @@ import qualified Data.Set as Set
 import Syntax
 import Types
 
+-- Infer 是类型推断过程的小上下文：Int 用来发放新的类型变量，Either 用来提前返回错误。
 newtype Infer a = Infer { runInfer :: Int -> Either TypeError (a, Int) }
 
 instance Functor Infer where
@@ -39,9 +40,11 @@ instance Monad Infer where
 throwInfer :: TypeError -> Infer a
 throwInfer err = Infer $ \_ -> Left err
 
+-- fresh 每次生成一个新的类型变量 a0、a1、a2...，代表“目前还不知道的类型”。
 fresh :: Infer Type
 fresh = Infer $ \supply -> Right (TVar ("a" ++ show supply), supply + 1)
 
+-- instantiate 使用一个多态类型时，把 forall 绑定的变量换成新的未知类型。
 instantiate :: Scheme -> Infer Type
 instantiate (Scheme vars t) = do
   freshVars <- mapM (const fresh) vars
@@ -51,6 +54,7 @@ instantiate (Scheme vars t) = do
 inferTop :: Exp -> Either TypeError Scheme
 inferTop = inferTopWithEnv preludeEnv
 
+-- inferTopWithEnv 是对外入口：推断表达式类型，并把可泛化的变量重新包装成 Scheme。
 inferTopWithEnv :: TypeEnv -> Exp -> Either TypeError Scheme
 inferTopWithEnv env expr =
   case runInfer (infer env expr) 0 of
@@ -60,6 +64,7 @@ inferTopWithEnv env expr =
 infer :: TypeEnv -> Exp -> Infer (Subst, Type)
 infer env expr =
   case expr of
+    -- 变量要先从环境里查类型；多态变量在每次使用时都要实例化。
     EVar name ->
       case lookupEnv env name of
         Nothing -> throwInfer (UnboundVariable name)
@@ -70,12 +75,14 @@ infer env expr =
     ELit lit ->
       pure (nullSubst, inferLit lit)
 
+    -- lambda 的参数先给一个新类型变量，再用函数体里的约束慢慢确定它。
     EAbs name body -> do
       tv <- fresh
       let env' = extend (remove env name) name (Scheme [] tv)
       (s1, t1) <- infer env' body
       pure (s1, TFun (apply s1 tv) t1)
 
+    -- 函数调用要求左边的类型能统一成“参数类型 -> 返回类型”。
     EApp fun arg -> do
       tv <- fresh
       (s1, tFun) <- infer env fun
@@ -83,6 +90,7 @@ infer env expr =
       s3 <- mgu (apply s2 tFun) (TFun tArg tv)
       pure (s3 `composeSubst` s2 `composeSubst` s1, apply s3 tv)
 
+    -- let 先推断绑定值并 generalize，再带着这个多态绑定检查 body。
     ELet name value body -> do
       (s1, t1) <- infer env value
       let envAfterValue = apply s1 env
@@ -91,6 +99,7 @@ infer env expr =
       (s2, t2) <- infer envForBody body
       pure (s2 `composeSubst` s1, t2)
 
+    -- if 要求条件是 Bool，并要求 then/else 两个分支最终类型一致。
     EIf cond yes no -> do
       (s1, tCond) <- infer env cond
       sBool <- mgu tCond TBool
@@ -103,9 +112,11 @@ infer env expr =
     EBin op left right ->
       inferBin env op left right
 
+    -- 列表会要求所有元素拥有同一种类型。
     EList items ->
       inferList env items
 
+    -- 伪代码 block 按语句顺序更新环境，最后读取输出变量的类型。
     EBlock stmts outputName -> do
       (s1, env') <- inferStmts env stmts
       case lookupEnv (apply s1 env') outputName of
@@ -118,6 +129,7 @@ inferLit :: Lit -> Type
 inferLit (LInt _) = TInt
 inferLit (LBool _) = TBool
 
+-- 空列表的元素类型暂时未知；非空列表用第一个元素约束后续元素。
 inferList :: TypeEnv -> [Exp] -> Infer (Subst, Type)
 inferList _ [] = do
   tv <- fresh
@@ -137,6 +149,7 @@ inferListRest env subst itemType (item:items) = do
       itemType' = apply subst' itemType
   inferListRest env' subst' itemType' items
 
+-- 语句推断的结果不是一个值类型，而是更新后的 TypeEnv。
 inferStmts :: TypeEnv -> [Stmt] -> Infer (Subst, TypeEnv)
 inferStmts env [] = pure (nullSubst, env)
 inferStmts env (stmt:stmts) = do
@@ -149,6 +162,7 @@ inferStmt env stmt =
   case stmt of
     SAssign name expr -> inferAssign env name expr
 
+    -- block if 会分别推断两个分支，再合并两个分支对变量类型的约束。
     SIfStmt cond yes no -> do
       (s1, tCond) <- infer env cond
       sBool <- mgu tCond TBool
@@ -159,6 +173,7 @@ inferStmt env stmt =
       sMerge <- mergeEnvs (apply sNo envYes) (apply sYes envNo)
       pure (sMerge `composeSubst` sNo `composeSubst` sYes `composeSubst` sCond, apply sMerge (apply sNo envYes))
 
+    -- switch 先检查被匹配对象，再要求每个 case 值能和它统一。
     SSwitchStmt subject cases otherwiseBranch -> do
       (sSubject, tSubject) <- infer env subject
       (sCases, envCases) <- inferCases (apply sSubject env) (apply sSubject tSubject) cases
@@ -166,6 +181,7 @@ inferStmt env stmt =
       sMerge <- mergeEnvs (apply sOtherwise envCases) envOtherwise
       pure (sMerge `composeSubst` sOtherwise `composeSubst` sCases `composeSubst` sSubject, apply sMerge (apply sOtherwise envCases))
 
+    -- for 要求被遍历对象是列表，并把循环变量绑定成列表元素类型。
     SFor itemName items body -> do
       tv <- fresh
       (sItems, tItems) <- infer env items
@@ -176,6 +192,7 @@ inferStmt env stmt =
       (sBody, envBody) <- inferStmts envLoop body
       pure (sBody `composeSubst` sLoop, remove envBody itemName)
 
+    -- while 条件必须是 Bool，循环体里的赋值会继续更新环境。
     SWhile cond body -> do
       (sCond, tCond) <- infer env cond
       sBool <- mgu tCond TBool
@@ -183,6 +200,7 @@ inferStmt env stmt =
       (sBody, envBody) <- inferStmts (apply sLoop env) body
       pure (sBody `composeSubst` sLoop, envBody)
 
+-- 赋值第一次出现时会扩展环境；重复赋值时必须和旧类型统一。
 inferAssign :: TypeEnv -> String -> Exp -> Infer (Subst, TypeEnv)
 inferAssign env name expr = do
   (s1, tExpr) <- infer env expr
@@ -208,6 +226,7 @@ inferCases env subjectType ((caseExpr, body):cases) = do
   sMerge <- mergeEnvs (apply sRest envBody) envRest
   pure (sMerge `composeSubst` sRest `composeSubst` sBody `composeSubst` sHead, apply sMerge (apply sRest envBody))
 
+-- 合并两个分支环境时，同名变量在两边出现就必须能统一成同一种类型。
 mergeEnvs :: TypeEnv -> TypeEnv -> Infer Subst
 mergeEnvs (TypeEnv left) (TypeEnv right) =
   mergeNames nullSubst (Map.keysSet left `Set.union` Map.keysSet right)
@@ -224,6 +243,7 @@ mergeEnvs (TypeEnv left) (TypeEnv right) =
               mergeNames (sSame `composeSubst` subst) rest
             _ -> mergeNames subst rest
 
+-- 二元运算先推断左右表达式，再按运算符选择 Int、Bool 或相等性约束。
 inferBin :: TypeEnv -> BinOp -> Exp -> Exp -> Infer (Subst, Type)
 inferBin env op left right = do
   (s1, tLeft) <- infer env left
@@ -264,6 +284,7 @@ inferIntCompare s1 s2 tLeft tRight = do
   s4 <- mgu (apply s3 tRight) TInt
   pure (s4 `composeSubst` s3 `composeSubst` s2 `composeSubst` s1, TBool)
 
+-- mgu 是“最一般合一”：找到让两个类型相等所需的最小替换表。
 mgu :: Type -> Type -> Infer Subst
 mgu (TFun left right) (TFun left' right') = do
   s1 <- mgu left left'
@@ -276,6 +297,7 @@ mgu TBool TBool = pure nullSubst
 mgu (TList left) (TList right) = mgu left right
 mgu t1 t2 = throwInfer (TypesDoNotUnify t1 t2)
 
+-- bindVar 把类型变量绑定到具体类型；occurs check 防止 a = a -> b 这样的无限类型。
 bindVar :: String -> Type -> Infer Subst
 bindVar name t
   | t == TVar name = pure nullSubst

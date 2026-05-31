@@ -1,6 +1,8 @@
-# Algorithm W / Pseudo-W
+# Pseudo-W
 
-这是一个用 Haskell 实现的 Algorithm W 类型推断器。项目目标不是实现完整 Haskell 或完整 MATLAB，而是提供一个小而清楚的 Pseudo-W 语言：用户可以输入 lambda/let 表达式，或编写 MATLAB-like 的伪代码函数文件，程序会解析它、解释自己“看懂了什么”，并检查类型是否合规。
+Pseudo-W 是一个用 Haskell 实现的 MATLAB-like 伪代码类型检查器。它的核心算法是 Algorithm W：Pseudo-W 负责读取表达式和伪代码、解释自己“看懂了什么”，Algorithm W 负责完成 Hindley-Milner 风格的类型推断。
+
+项目目标不是实现完整 Haskell 或完整 MATLAB，而是提供一个小而清楚的伪代码语言：用户可以输入 lambda/let 表达式，或编写 MATLAB-like 的 pseudo-functions 文件，程序会解析它、解释内部理解过程，并检查类型是否合规。
 
 ## 能做什么
 
@@ -231,7 +233,7 @@ end
 4. 规范化表达式
 5. 类型推断结果
 
-这个输出是面向用户的，不是完整 Algorithm W 教程。它的目标是让用户看懂：程序到底把输入解释成了什么。
+这个输出是面向用户的，不是完整 Algorithm W 教程。它的目标是让用户看懂：Pseudo-W 到底把输入解释成了什么。
 
 ## 当前限制
 
@@ -253,7 +255,7 @@ end
 app/Main.hs      命令行、REPL、中文输出
 src/Syntax.hs    表达式 AST 和二元运算
 src/Parser.hs    手写 parser 和 pseudo 文件解析
-src/Infer.hs     Algorithm W、合一和类型推断
+src/Infer.hs     Algorithm W 核心、合一和类型推断
 src/Types.hs     类型、类型方案、类型环境和错误
 examples/        示例输入
 ```

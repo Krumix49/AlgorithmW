@@ -19,6 +19,7 @@ import Data.List (isInfixOf, isPrefixOf)
 import Syntax
 import Types (TypeError(..))
 
+-- Token 是词法分析的结果：把字符流先拆成这些小块，后面的解析器只看 Token。
 data Token
   = TokIdent String
   | TokInt Integer
@@ -40,12 +41,14 @@ data Token
   | TokEOF
   deriving (Eq, Show)
 
+-- ParseTrace 保存 verbose 模式需要展示的中间结果。
 data ParseTrace = ParseTrace
   { traceSource :: String
   , traceTokens :: [Token]
   , traceExp :: Exp
   }
 
+-- PseudoFunction 是 .pseudo 文件里的一个 function block 解析后的结构。
 data PseudoFunction = PseudoFunction
   { pseudoName :: String
   , pseudoArgs :: [String]
@@ -55,11 +58,13 @@ data PseudoFunction = PseudoFunction
   , pseudoStartLine :: Int
   }
 
+-- SourceLine 保留清洗后的源码和原始行号，方便把错误定位回文件。
 data SourceLine = SourceLine
   { sourceLineNumber :: Int
   , sourceLineText :: String
   }
 
+-- Parser 是一个手写递归下降解析器：输入 Token 列表，输出结果和剩余 Token。
 newtype Parser a = Parser { runParser :: [Token] -> Either String (a, [Token]) }
 
 instance Functor Parser where
@@ -118,9 +123,11 @@ parsePseudoFile input =
 parsePseudoFileTrace :: String -> Either String [PseudoFunction]
 parsePseudoFileTrace source = parseBlocks (cleanLines source)
 
+-- 文件里的函数最后会变成多参数 lambda，供 Algorithm W 像普通表达式一样推断。
 expressionOfFunction :: PseudoFunction -> Exp
 expressionOfFunction fn = foldr EAbs (pseudoBody fn) (pseudoArgs fn)
 
+-- tokenize 只负责认出“词”，不判断语法是否合理。
 tokenize :: String -> Either String [Token]
 tokenize [] = Right [TokEOF]
 tokenize (c:cs)
@@ -189,9 +196,11 @@ validIdent name@(c:_) =
     , "true", "false", "elseif", "switch", "case", "otherwise"
     ]
 
+-- 表达式解析按优先级从低到高分层：let/lambda/if 最外层，函数调用和原子最内层。
 parseExpr :: Parser Exp
 parseExpr = parseLet
 
+-- let name = value in body 会先解析 value，再解析使用 name 的 body。
 parseLet :: Parser Exp
 parseLet = do
   token <- peek
@@ -205,6 +214,7 @@ parseLet = do
       ELet name value <$> parseExpr
     _ -> parseLambda
 
+-- 支持 \x y -> body 这种多参数 lambda，内部转成嵌套的 EAbs。
 parseLambda :: Parser Exp
 parseLambda = do
   token <- peek
@@ -217,6 +227,7 @@ parseLambda = do
       pure (foldr EAbs body names)
     _ -> parseIf
 
+-- if 表达式必须完整写出 then 和 else，因为类型推断要比较两个分支。
 parseIf :: Parser Exp
 parseIf = do
   token <- peek
@@ -250,6 +261,7 @@ parseAdd = chainLeft parseMul [("+", Add), ("-", Sub)]
 parseMul :: Parser Exp
 parseMul = chainLeft parseUnary [("*", Mul), ("/", Div)]
 
+-- 一元运算不单独进 AST，而是转成对内置函数 not / negate 的调用。
 parseUnary :: Parser Exp
 parseUnary = do
   token <- peek
@@ -259,6 +271,7 @@ parseUnary = do
     TokOp "-" -> advance >> EApp (EVar "negate") <$> parseUnary
     _ -> parseApp
 
+-- 函数应用左结合：f x y 会解析成 (f x) y。
 parseApp :: Parser Exp
 parseApp = do
   firstAtom <- parseAtom
@@ -281,6 +294,7 @@ manyAtoms = do
       atoms <- manyAtoms
       pure (atom : atoms)
 
+-- parseAtom 识别最小表达式单元：变量、字面量、括号表达式、列表和 f(...) 调用。
 parseAtom :: Parser Exp
 parseAtom = do
   token <- peek
@@ -306,6 +320,7 @@ parseAtom = do
       EList <$> parseListItems
     _ -> Parser $ \_ -> Left ("这里需要一个表达式原子，但实际看到：" ++ show token)
 
+-- 列表字面量使用 [a, b, c]，元素类型一致性留给 Infer.hs 检查。
 parseListItems :: Parser [Exp]
 parseListItems = do
   token <- peek
@@ -322,6 +337,7 @@ parseListItems = do
         TokRBracket -> advance >> pure items
         _ -> Parser $ \_ -> Left "列表字面量需要右括号 ']'，多个元素之间需要逗号 ','"
 
+-- f(a, b) 会被整理成普通函数应用：((f a) b)。
 parseCallArgs :: Parser [Exp]
 parseCallArgs = do
   token <- peek
@@ -338,6 +354,7 @@ parseCallArgs = do
         TokRParen -> advance >> pure args
         _ -> Parser $ \_ -> Left "函数调用需要右括号 ')'，多个参数之间需要逗号 ','"
 
+-- chainLeft 解析左结合二元运算，是 +、*、== 等优先级层共用的小工具。
 chainLeft :: Parser Exp -> [(String, BinOp)] -> Parser Exp
 chainLeft parseTerm ops = do
   left <- parseTerm
@@ -384,6 +401,7 @@ advance = Parser $ \tokens ->
     [] -> Right ((), [])
     _:rest -> Right ((), rest)
 
+-- parseBlocks 从清洗后的行列表里逐个识别 function block。
 parseBlocks :: [SourceLine] -> Either String [PseudoFunction]
 parseBlocks [] = Right []
 parseBlocks (line:rest)
@@ -452,12 +470,14 @@ startsTwoKeywords first second line =
     x:y:_ -> x == first && y == second
     _ -> False
 
+-- 单行函数的等号左侧必须像函数签名，避免把 output = f(x) 当成内联表达式函数。
 looksLikeSignature :: String -> Bool
 looksLikeSignature text =
   case parseSignature (trim text) of
     Right _ -> True
     Left _ -> False
 
+-- collectFunctionBody 会按嵌套深度找当前 function 对应的 end。
 collectFunctionBody :: SourceLine -> [SourceLine] -> Either String ([SourceLine], [SourceLine])
 collectFunctionBody headerLine = go 0 []
   where
@@ -472,6 +492,7 @@ collectFunctionBody headerLine = go 0 []
       | isWhileLine line = go (depth + 1) (line : acc) rest
       | otherwise = go depth (line : acc) rest
 
+-- function f(x) = expr 这种单行形式直接把右侧解析成表达式。
 parseInlineFunction :: SourceLine -> String -> Either String PseudoFunction
 parseInlineFunction original header = do
   (signature, bodyPart) <- maybeToEither "不是单行 function" (splitTopLevelEquals header)
@@ -480,6 +501,7 @@ parseInlineFunction original header = do
   body <- withLine original (parseExpression bodySource)
   pure (PseudoFunction name args bodySource body (sourceLineText original) (sourceLineNumber original))
 
+-- 多行 MATLAB-like function 会先解析函数头，再把函数体解析成 EBlock。
 parseBlockFunction :: SourceLine -> String -> [SourceLine] -> Either String PseudoFunction
 parseBlockFunction original header bodyLines = do
   (outputName, name, args) <- parseMatlabHeader header
@@ -517,6 +539,7 @@ parseArgs raw
   where
     parseArg arg = requireName (trim arg) ("参数名不合法：" ++ arg)
 
+-- 函数体如果有输出变量，就保留为语句块；没有输出变量时只允许单表达式。
 selectBody :: Maybe String -> [SourceLine] -> Either String (String, Exp)
 selectBody _ [] = Left "函数体为空"
 selectBody Nothing [single] = do
@@ -549,6 +572,7 @@ startsWithWhile :: [SourceLine] -> Bool
 startsWithWhile (line:_) = isWhileLine line
 startsWithWhile [] = False
 
+-- parseStatements 递归解析 block 内的赋值、if、switch、for、while。
 parseStatements :: [SourceLine] -> Either String [Stmt]
 parseStatements linesIn = do
   (stmts, rest) <- parseStatementsUntil (const False) linesIn
@@ -583,6 +607,7 @@ parseStatementsUntil stop linesIn@(line:rest)
       (stmts, finalRest) <- parseStatementsUntil stop rest
       Right (stmt : stmts, finalRest)
 
+-- 赋值语句是最小语句单元，右侧仍然按标准表达式解析。
 parseAssignmentStmt :: SourceLine -> Either String Stmt
 parseAssignmentStmt line =
   case splitTopLevelEquals (sourceLineText line) of
@@ -592,6 +617,7 @@ parseAssignmentStmt line =
       Right (SAssign name expr)
     Nothing -> Left (lineLabel line ++ "这里只支持赋值语句或 block 语句，实际看到：" ++ sourceLineText line)
 
+-- block if 的 elseif 会被递归转换成 else 分支里的嵌套 if。
 parseIfStmt :: SourceLine -> [SourceLine] -> Either String (Stmt, [SourceLine])
 parseIfStmt ifLine rest = do
   let condSource = trim (drop (length "if") (trim (sourceLineText ifLine)))
@@ -620,6 +646,7 @@ parseIfTail cond rest = do
   where
     ifStop line = isElseIfLine line || isElseLine line || isEndLine line
 
+-- switch 被保留为 SSwitchStmt，后续类型推断会检查 subject 和 case 值是否可比较。
 parseSwitchStmt :: SourceLine -> [SourceLine] -> Either String (Stmt, [SourceLine])
 parseSwitchStmt switchLine rest = do
   let subjectSource = trim (drop (length "switch") (trim (sourceLineText switchLine)))
@@ -650,6 +677,7 @@ parseSwitchCases (line:rest)
           | otherwise -> Left (lineLabel marker ++ "switch block 结构不完整：" ++ sourceLineText marker)
     switchStop marker = isCaseLine marker || isOtherwiseLine marker || isEndLine marker
 
+-- for 支持 `for x in xs` 和 MATLAB-like 的 `for x = xs` 两种写法。
 parseForStmt :: SourceLine -> [SourceLine] -> Either String (Stmt, [SourceLine])
 parseForStmt forLine rest = do
   (itemName, itemsSource) <- parseForHeader forLine
@@ -670,6 +698,7 @@ parseForHeader line =
         Just (left, right) | validIdent (trim left) && not (null (trim right)) -> Right (trim left, trim right)
         _ -> Left (lineLabel line ++ "for 需要形如 `for x in xs` 或 `for x = xs`")
 
+-- while 只解析结构，条件是不是 Bool 由 Infer.hs 检查。
 parseWhileStmt :: SourceLine -> [SourceLine] -> Either String (Stmt, [SourceLine])
 parseWhileStmt whileLine rest = do
   let condSource = trim (drop (length "while") (trim (sourceLineText whileLine)))
@@ -716,6 +745,7 @@ splitCommas input = go 0 "" input
       | c == ',' && depth == 0 = current : go depth "" cs
       | otherwise = go depth (current ++ [c]) cs
 
+-- cleanLines 会去掉空行、注释和行尾分号，同时保留原始行号。
 cleanLines :: String -> [SourceLine]
 cleanLines source =
   [ SourceLine lineNo cleaned
