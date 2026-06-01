@@ -14,19 +14,23 @@ import Derivation.Trace
   , InferenceResult(..)
   )
 import Syntax (Exp)
-import Text.Blaze.Html (Html, toHtml, toValue)
+import Text.Blaze.Html (Html, preEscapedToHtml, toHtml, toValue)
 import Text.Blaze.Html.Renderer.String (renderHtml)
 import Text.Blaze.Html5 ((!))
 import qualified Text.Blaze.Html5 as H
 import qualified Text.Blaze.Html5.Attributes as A
 import Types (TypeError)
-import Web.AstHtml (renderAstTree)
 import Web.TraceHtml (renderTraceHtml)
 
 data Example = Example
   { exLabel :: String
   , exSource :: String
+  , exMode :: ExampleMode
   }
+
+data ExampleMode
+  = ExpressionExample
+  | PseudoFunctionExample
 
 examples :: [Example]
 examples = map toExample (concatMap snd inferUnitsByGroup)
@@ -34,12 +38,31 @@ examples = map toExample (concatMap snd inferUnitsByGroup)
 examplesByGroup :: [(String, [Example])]
 examplesByGroup =
   map (\(group, units) -> (groupLabel group, map toExample units)) inferUnitsByGroup
+    ++ [("伪代码函数", [chooseExample])]
 
 toExample :: InferUnit -> Example
 toExample unit =
   Example
     { exLabel = iuLabel unit
     , exSource = iuSource unit
+    , exMode = ExpressionExample
+    }
+
+chooseExample :: Example
+chooseExample =
+  Example
+    { exLabel = "choose(flag, a, b)"
+    , exSource =
+        unlines
+          [ "function y = choose(flag, a, b)"
+          , "  if flag"
+          , "    y = a"
+          , "  else"
+          , "    y = b"
+          , "  end"
+          , "end"
+          ]
+    , exMode = PseudoFunctionExample
     }
 
 renderPage :: String -> Maybe (Either TypeError InferenceOutcome) -> Html
@@ -54,7 +77,7 @@ renderPage source outcome =
       H.header ! A.class_ "page-header" $ do
         H.h1 "Algorithm W 类型推断"
         H.p ! A.class_ "subtitle" $
-          "输入表达式，查看 AST、推断类型与逐步推导"
+          "输入表达式，查看推断类型与逐步推导"
       H.main ! A.class_ "page-main" $ do
         renderInputSection source
         case outcome of
@@ -62,6 +85,7 @@ renderPage source outcome =
           Just (Left err) -> renderParseError err
           Just (Right (OutcomeInferErr expr err _events)) -> renderInferError source expr err
           Just (Right (OutcomeOk result)) -> renderSuccess source result
+      H.script ! A.type_ "text/javascript" $ preEscapedToHtml pageScript
 
 pageHtml :: String -> Maybe (Either TypeError InferenceOutcome) -> String
 pageHtml source outcome =
@@ -94,21 +118,26 @@ renderExamples =
       H.div ! A.class_ "examples-group" $ do
         H.span ! A.class_ "examples-group-label" $ toHtml groupName
         H.div ! A.class_ "examples-list" $ mapM_ renderExampleBtn groupExamples
-    renderExampleBtn (Example label src) =
+    renderExampleBtn (Example label src mode) =
       H.form ! A.method "post" ! A.action "/infer" ! A.class_ "example-form" $ do
         H.input ! A.type_ "hidden" ! A.name "source" ! A.value (toValue src)
+        H.input ! A.type_ "hidden" ! A.name "mode" ! A.value (toValue (modeValue mode))
         H.button
           ! A.type_ "submit"
           ! A.class_ "btn-example"
           ! A.title (toValue src)
           $ toHtml label
 
+modeValue :: ExampleMode -> String
+modeValue ExpressionExample = "expr"
+modeValue PseudoFunctionExample = "pseudo-function"
+
 renderWelcome :: Html
 renderWelcome =
   H.section ! A.class_ "card welcome-card" ! H.customAttribute "role" "status" $ do
     H.h2 "开始推断"
     H.p ! A.class_ "welcome-text" $
-      "在上方输入表达式，或点击快速示例按钮，查看 AST、推断类型与逐步推导过程。"
+      "在上方输入表达式，或点击快速示例按钮，查看推断类型与逐步推导过程。"
 
 renderParseError :: TypeError -> Html
 renderParseError err =
@@ -124,7 +153,7 @@ renderParseError err =
       renderEmptyResults
 
 renderInferError :: String -> Exp -> TypeError -> Html
-renderInferError _source expr err =
+renderInferError _source _expr err =
   H.section
     ! A.class_ "card error-card"
     ! H.customAttribute "role" "alert"
@@ -134,12 +163,12 @@ renderInferError _source expr err =
       H.p ! A.class_ "error-msg" $ do
         H.strong $ "错误："
         toHtml (show err)
-      renderResultGrid (Just expr) Nothing
+      renderResultGrid Nothing
       renderTraceSection (H.p ! A.class_ "trace-empty" $ "推断失败，无完整推导记录。")
 
 renderSuccess :: String -> InferenceResult -> Html
 renderSuccess _source r = do
-  renderResultGrid (Just (irExpr r)) (Just (show (irScheme r)))
+  renderResultGrid (Just (show (irScheme r)))
   renderTraceSection (renderTraceHtml (irEvents r))
 
 renderTraceSection :: Html -> Html
@@ -148,27 +177,18 @@ renderTraceSection content =
     H.h2 "推断过程"
     H.div ! A.class_ "trace-panel" $ content
 
-renderResultGrid :: Maybe Exp -> Maybe String -> Html
-renderResultGrid mAst mType =
+renderResultGrid :: Maybe String -> Html
+renderResultGrid mType =
   H.section ! A.class_ "results-grid" $ do
-    H.div ! A.class_ "card result-card" $ do
-      H.h3 "AST"
-      renderAst mAst
     H.div ! A.class_ "card result-card" $ do
       H.h3 "推断类型"
       case mType of
         Just t ->
-          H.p ! A.class_ "type-ok" $ do
-            H.span ! A.class_ "type-label" $ "推断类型："
-            codeBlock t
+          H.div ! A.class_ "type-ok" $ codeBlock t
         Nothing -> H.p ! A.class_ "placeholder" $ "—"
 
 renderEmptyResults :: Html
-renderEmptyResults = renderResultGrid Nothing Nothing
-
-renderAst :: Maybe Exp -> Html
-renderAst Nothing = H.p ! A.class_ "placeholder" $ "—"
-renderAst (Just expr) = renderAstTree expr
+renderEmptyResults = renderResultGrid Nothing
 
 codeBlock :: String -> Html
 codeBlock s = H.pre ! A.class_ "code-block" $ toHtml s
@@ -262,7 +282,7 @@ pageCssLayout =
   , "}"
   , ".results-grid {"
   , "  display: grid;"
-  , "  grid-template-columns: 1fr 1fr;"
+  , "  grid-template-columns: 1fr;"
   , "  gap: var(--space-4);"
   , "  margin-bottom: var(--space-4);"
   , "}"
@@ -373,28 +393,11 @@ pageCssComponents =
   , "  font-weight: 600;"
   , "  margin: 0;"
   , "}"
-  , ".type-label {"
-  , "  font-family: system-ui, sans-serif;"
-  , "  font-weight: 500;"
-  , "  color: var(--color-text-muted);"
-  , "  margin-right: var(--space-2);"
-  , "}"
   , ".placeholder { color: var(--color-text-muted); margin: 0; }"
   , ".welcome-text { margin: 0; color: var(--color-text-muted); }"
   , ".error-card { border-left: 4px solid var(--color-error); }"
   , ".error-msg { color: var(--color-error); margin: 0 0 var(--space-4); }"
   , ".trace-empty { color: var(--color-text-muted); font-style: italic; margin: 0; }"
-  , ".ast-panel {"
-  , "  overflow: auto;"
-  , "  max-height: 28rem;"
-  , "  background: var(--color-code-bg);"
-  , "  border-radius: var(--radius);"
-  , "  padding: var(--space-3);"
-  , "}"
-  , ".ast-panel svg { display: block; min-width: 100%; }"
-  , ".ast-node { fill: var(--color-surface); stroke: var(--color-border); }"
-  , ".ast-edge { stroke: var(--color-text-muted); stroke-width: 1.5; }"
-  , ".ast-label { font-family: ui-monospace, 'Cascadia Code', monospace; font-size: 12px; fill: var(--color-text); }"
   ]
 
 pageCssTrace :: [String]
@@ -414,12 +417,31 @@ pageCssTrace =
   , "  font-size: 0.88rem;"
   , "}"
   , ".trace-item { margin: 0; padding: 0; }"
+  , ".trace-children { list-style: none; margin: 0; padding: 0; }"
+  , ".trace-block.is-collapsed > .trace-children > .trace-detail-item { display: none; }"
   , ".trace-step {"
   , "  margin-bottom: var(--space-2);"
   , "  padding: var(--space-2) var(--space-3);"
   , "  border-radius: var(--radius);"
   , "  border-left: 3px solid transparent;"
   , "}"
+  , ".trace-enter { display: flex; align-items: flex-start; gap: var(--space-2); }"
+  , ".trace-toggle {"
+  , "  width: 1.5rem;"
+  , "  height: 1.5rem;"
+  , "  flex: 0 0 auto;"
+  , "  border: 1px solid var(--color-border);"
+  , "  border-radius: var(--radius);"
+  , "  background: var(--color-surface);"
+  , "  color: var(--color-text-muted);"
+  , "  cursor: pointer;"
+  , "  font-size: 0.8rem;"
+  , "  line-height: 1;"
+  , "  margin-left: auto;"
+  , "}"
+  , ".trace-toggle:hover { border-color: var(--color-accent); color: var(--color-accent); }"
+  , ".trace-toggle:focus-visible { outline: var(--focus-ring); outline-offset: 2px; }"
+  , ".trace-content { flex: 1 1 auto; min-width: 0; }"
   , ".trace-enter { border-left-color: var(--color-trace-enter); }"
   , ".trace-exit {"
   , "  border-left-color: var(--color-trace-exit);"
@@ -434,6 +456,7 @@ pageCssTrace =
   , ".app-fraction { margin: var(--space-2) 0 var(--space-2) var(--space-4); }"
   , ".frac-line { font-family: ui-monospace, monospace; }"
   , ".frac-bar { color: var(--color-text-muted); letter-spacing: -0.05em; }"
+  , "script { display: none; }"
   ]
 
 traceDepthCss :: [String]
@@ -472,3 +495,17 @@ pageCssResponsive =
   , "  .trace-panel { max-height: 32rem; }"
   , "}"
   ]
+
+pageScript :: String
+pageScript =
+  unlines
+    [ "document.addEventListener('click', function (event) {"
+    , "  var button = event.target.closest('[data-trace-toggle]');"
+    , "  if (!button) return;"
+    , "  var block = button.closest('.trace-block');"
+    , "  if (!block) return;"
+    , "  var collapsed = block.classList.toggle('is-collapsed');"
+    , "  button.setAttribute('aria-expanded', collapsed ? 'false' : 'true');"
+    , "  button.textContent = collapsed ? '>' : 'V';"
+    , "});"
+    ]

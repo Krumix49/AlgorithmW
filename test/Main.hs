@@ -11,7 +11,7 @@ import Derivation.InferExamples
   , outcomeTrace
   , runUnit
   )
-import Derivation.Trace (InferenceOutcome(..), InferenceResult(..))
+import Derivation.Trace (InferenceOutcome(..), InferenceResult(..), inferPseudoFunctionSource)
 import Parser (parseExp)
 import Test.Tasty (TestTree, defaultMain, testGroup)
 import Test.Tasty.HUnit (Assertion, (@?=), assertFailure, testCase)
@@ -22,6 +22,7 @@ main =
     ( testGroup
         "Infer display"
         ( smokeTests
+            ++ pseudoFunctionTests
             ++ map unitTest inferUnits
         )
     )
@@ -33,6 +34,29 @@ smokeTests =
   , testCase "all unit sources parse" $
       mapM_ assertParses inferUnits
   ]
+
+pseudoFunctionTests :: [TestTree]
+pseudoFunctionTests =
+  [ testCase "choose pseudo function infers through web trace path" $
+      case inferPseudoFunctionSource chooseSource of
+        Left err -> assertFailure ("unexpected parse error: " ++ show err)
+        Right (OutcomeInferErr _ err _) ->
+          assertFailure ("unexpected inference error: " ++ show err)
+        Right (OutcomeOk result) ->
+          ("Bool ->" `isInfixOf` show (irScheme result)) @?= True
+  ]
+
+chooseSource :: String
+chooseSource =
+  unlines
+    [ "function y = choose(flag, a, b)"
+    , "  if flag"
+    , "    y = a"
+    , "  else"
+    , "    y = b"
+    , "  end"
+    , "end"
+    ]
 
 assertParses :: InferUnit -> Assertion
 assertParses unit =

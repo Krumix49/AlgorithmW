@@ -9,38 +9,74 @@ import Derivation.CourseRules
   , ruleLabel
   , ruleSource
   )
-import Syntax ()
+import Syntax (Exp)
 import Text.Blaze.Html (Html, toValue)
 import Text.Blaze.Html5 ((!))
 import qualified Text.Blaze.Html5 as H
 import qualified Text.Blaze.Html5.Attributes as A
 import TraceEvents hiding (depth, env, expr, subst, typ, tv, scheme, t1, t2, rule, detail, message)
-import Types ()
+import Types (Subst, Type, TypeEnv)
+
+data TraceNode
+  = TraceBlock Int Exp TypeEnv [TraceNode] (Maybe (Subst, Type))
+  | TraceLeaf TraceEvent
 
 renderTraceHtml :: [TraceEvent] -> Html
 renderTraceHtml events =
   H.ol
     ! A.class_ "trace-log"
     ! H.customAttribute "aria-label" "推断过程"
-    $ mapM_ renderTraceItem events
+    $ renderTraceNodes "trace" (parseTrace events)
+
+parseTrace :: [TraceEvent] -> [TraceNode]
+parseTrace events = fst (parseNodes Nothing events)
+
+parseNodes :: Maybe Int -> [TraceEvent] -> ([TraceNode], [TraceEvent])
+parseNodes _ [] = ([], [])
+parseNodes stopDepth events@(ExitInfer d _ _ : _)
+  | Just d == stopDepth = ([], events)
+parseNodes stopDepth (EnterInfer d e env : rest) =
+  let (children, afterChildren) = parseNodes (Just d) rest
+      (node, afterNode) =
+        case afterChildren of
+          ExitInfer d' s t : rest'
+            | d' == d -> (TraceBlock d e env children (Just (s, t)), rest')
+          _ -> (TraceBlock d e env children Nothing, afterChildren)
+      (siblings, afterSiblings) = parseNodes stopDepth afterNode
+  in (node : siblings, afterSiblings)
+parseNodes stopDepth (event : rest) =
+  let (siblings, afterSiblings) = parseNodes stopDepth rest
+  in (TraceLeaf event : siblings, afterSiblings)
+
+renderTraceNodes :: String -> [TraceNode] -> Html
+renderTraceNodes prefix nodes =
+  mapM_ renderIndexed (zip [(0 :: Int)..] nodes)
   where
-    renderTraceItem event =
-      H.li ! A.class_ "trace-item" $ renderEvent event
+    renderIndexed (idx, node) =
+      renderTraceNode (prefix ++ "-" ++ show idx) node
+
+renderTraceNode :: String -> TraceNode -> Html
+renderTraceNode _ (TraceLeaf event) =
+  H.li ! A.class_ "trace-item trace-detail-item" $ renderEvent event
+renderTraceNode ident (TraceBlock d e env children mExit) =
+  H.li ! A.class_ "trace-item" $
+    H.div ! A.class_ "trace-block is-collapsed" $ do
+      renderEnterHeader d e env bodyId
+      H.ol
+        ! A.class_ "trace-children"
+        ! A.id (toValue bodyId)
+        $ renderTraceNodes ident children
+      case mExit of
+        Just (s, t) -> renderExitLine d s t
+        Nothing -> pure ()
+  where
+    bodyId = ident ++ "-body"
 
 renderEvent :: TraceEvent -> Html
 renderEvent (EnterInfer d e env) =
-  depthDiv d "trace-enter" $ do
-    H.span ! A.class_ "trace-label" $ "推断 "
-    codeText (show e)
-    H.span ! A.class_ "trace-env" $ do
-      "  环境: "
-      codeText (show env)
+  renderEnterHeader d e env ""
 renderEvent (ExitInfer d s t) =
-  depthDiv d "trace-exit" $ do
-    H.span ! A.class_ "trace-arrow" $ "=> 替换: "
-    codeText (show s)
-    H.span ! A.class_ "trace-arrow" $ ", 类型: "
-    codeText (show t)
+  renderExitLine d s t
 renderEvent (FreshVar d tv) =
   depthDiv d "trace-step" $ H.toHtml ("fresh：生成新类型变量 " ++ show tv)
 renderEvent (InstantiateE d sch typ) =
@@ -65,6 +101,35 @@ renderEvent (RuleNote d AppRule detail) =
     renderAppFraction detail
 renderEvent (RuleNote d r detail) =
   ruleLine d r (ruleLabel r ++ ": " ++ detail)
+
+renderEnterHeader :: Int -> Exp -> TypeEnv -> String -> Html
+renderEnterHeader d e env bodyId =
+  depthDiv d "trace-enter" $ do
+    H.span ! A.class_ "trace-content" $ do
+      H.span ! A.class_ "trace-label" $ "推断 "
+      codeText (show e)
+      H.span ! A.class_ "trace-env" $ do
+        "  环境: "
+        codeText (show env)
+    if null bodyId
+      then pure ()
+      else
+        H.button
+          ! A.type_ "button"
+          ! A.class_ "trace-toggle"
+          ! H.customAttribute "data-trace-toggle" "true"
+          ! H.customAttribute "aria-expanded" "false"
+          ! H.customAttribute "aria-controls" (toValue bodyId)
+          ! A.title "展开/折叠内部推断步骤"
+          $ ">"
+
+renderExitLine :: Int -> Subst -> Type -> Html
+renderExitLine d s t =
+  depthDiv d "trace-exit" $ do
+    H.span ! A.class_ "trace-arrow" $ "=> 替换: "
+    codeText (show s)
+    H.span ! A.class_ "trace-arrow" $ ", 类型: "
+    codeText (show t)
 
 depthDiv :: Int -> String -> Html -> Html
 depthDiv d cls content =

@@ -2,6 +2,7 @@ module Derivation.Trace   -- 模块名，下方是倒出列表
   ( InferenceResult(..)   -- 导出类型+构造子。case当中需要构造子进行模式匹配。
   , InferenceOutcome(..)
   , inferSource
+  , inferPseudoFunctionSource
   , inferParsed
   , inferTopTrace
   , inferTopTraceWithEnv
@@ -9,10 +10,10 @@ module Derivation.Trace   -- 模块名，下方是倒出列表
 
 import Derivation.Render (renderTrace)
 import Infer (infer, inferWithPrelude, runInferMTrace)
-import Parser (parseExp)
+import Parser (expressionOfFunction, parseExp, parsePseudoFileTrace)
 import Syntax (Exp)
 import TraceEvents (TraceEvent)
-import Types (Scheme, TypeEnv, TypeError, generalize, apply)
+import Types (Scheme, TypeEnv, TypeError(..), generalize, apply)
 
 data InferenceResult = InferenceOk
   { irExpr :: Exp
@@ -28,18 +29,28 @@ inferSource :: String -> Either TypeError InferenceOutcome  -- Either A B 表示
 inferSource src =
   case parseExp src of
     Left err -> Left err
-    Right expr ->
-      case runInferMTrace (inferWithPrelude 0 expr) 0 of
-        Left (err, traceLog) -> Right (OutcomeInferErr expr err traceLog)
-        Right (((env, subst, t), _, traceLog)) ->
-          Right
-            ( OutcomeOk
-                InferenceOk
-                  { irExpr = expr
-                  , irScheme = generalize (apply subst env) (apply subst t)
-                  , irEvents = traceLog
-                  }
-            )
+    Right expr -> inferExpressionOutcome expr
+
+inferPseudoFunctionSource :: String -> Either TypeError InferenceOutcome
+inferPseudoFunctionSource src =
+  case parsePseudoFileTrace src of
+    Left err -> Left (ParseFailure err)
+    Right [] -> Left (ParseFailure "没有找到可展示的 pseudo function")
+    Right (fn:_) -> inferExpressionOutcome (expressionOfFunction fn)
+
+inferExpressionOutcome :: Exp -> Either TypeError InferenceOutcome
+inferExpressionOutcome expr =
+  case runInferMTrace (inferWithPrelude 0 expr) 0 of
+    Left (err, traceLog) -> Right (OutcomeInferErr expr err traceLog)
+    Right (((env, subst, t), _, traceLog)) ->
+      Right
+        ( OutcomeOk
+            InferenceOk
+              { irExpr = expr
+              , irScheme = generalize (apply subst env) (apply subst t)
+              , irEvents = traceLog
+              }
+        )
 
 inferParsed :: Exp -> Either TypeError InferenceResult
 inferParsed expr =
